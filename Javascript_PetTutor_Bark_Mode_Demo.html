@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<!--
+The MIT License (MIT)
+
+Copyright (c) 2021 Nathan Jenkins
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Javascript PetTutor Bark Mode Demo</title>
+  <style>
+  #volume_threshold {
+    --current_volume: 0%;
+    position: relative;
+  }
+
+  #volume_threshold::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: var(--current_volume);
+    background-color: green;
+    opacity: .5;
+    transition: width 100ms linear;
+  }
+</style>
+<script>
+var analyser; ///< Handle for microphone processing.
+let characteristicUuid = "b0e6a4bf-cccc-ffff-330c-0000000000f1"; // Hard code the PetTutor characteristic ID.
+let feeders = []; ///< Create an array of feeder objects.
+var interval; ///< Handle for the mic polling function.
+let isRunning = false; ///< Flag to ensure the timers actually stop.
+var lastFeed; ///< Stores the last feeding time to enforce cooldown.
+let serviceUuid = "b0e6a4bf-cccc-ffff-330c-0000000000f0"; // Hard code the PetTutor service ID.
+let timeouts = [null, null, null];
+var volume; ///< Stores the last retrived volume.
+
+document.addEventListener("DOMContentLoaded", async function() {
+  // Initialize last feed.
+  lastFeed = 0;
+  // Initialize microphone.
+  interval = null;
+  navigator.getUserMedia = navigator.getUserMedia ||
+  navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+  navigator.getUserMedia({
+    "audio": {
+      "mandatory": {
+        "googEchoCancellation": "false",
+        "googAutoGainControl": "false",
+        "googNoiseSuppression": "false",
+        "googHighpassFilter": "false"
+      },
+      "optional": []
+    },
+  }, function(audioStream) {
+    const audioContext = new AudioContext();
+    const audioSource = audioContext.createMediaStreamSource(audioStream);
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.minDecibels = -100;
+    analyser.maxDecibels = 0; // Loudest possible sound.
+    analyser.smoothingTimeConstant = 0;
+    audioSource.connect(analyser);
+  }, function() {
+    alert("Unable to open microphone.");
+  });
+});
+
+function barkMode(penalizeBark){
+  // Setup variables.
+  var penaltyDropdown = document.getElementById("sound_penalty_dropdown");
+  var penaltyDistribution = penaltyDropdown.options[penaltyDropdown.selectedIndex].value;
+  var rewardDropdown = document.getElementById("sound_treat_dropdown");
+  var rewardDistribution = rewardDropdown.options[rewardDropdown.selectedIndex].value;
+  var delayTime = (document.getElementById("delayHours").value * 360000) +
+  (document.getElementById("delayMinutes").value * 60000) +
+  (document.getElementById("delaySeconds").value * 1000);
+  var sessionTime = (document.getElementById("sessionHours").value * 360000) +
+  (document.getElementById("sessionMinutes").value * 60000) +
+  (document.getElementById("sessionSeconds").value * 1000);
+  var minPenalty = (document.getElementById("minPenaltyMinutes").value * 60000) +
+  (document.getElementById("minPenaltySeconds").value * 1000);
+  var maxPenalty = (document.getElementById("maxPenaltyMinutes").value * 60000) +
+  (document.getElementById("maxPenaltySeconds").value * 1000);
+  var minReward = (document.getElementById("minTreatMinutes").value * 60000) +
+  (document.getElementById("minTreatSeconds").value * 1000);
+  var maxReward = (document.getElementById("maxTreatMinutes").value * 60000) +
+  (document.getElementById("maxTreatSeconds").value * 1000);
+
+  // Define functions.
+  function treat(){
+    if(isRunning){
+      feedAll();
+      timeouts[2] = setTimeout(treat, getRandom(minReward,
+        maxReward, rewardDistribution));
+    }
+  };
+
+    // Initialize threshold.
+    getVolume();
+    document.getElementById("volume_threshold").value = volume + 1;
+
+    // Setup session delay.
+    timeouts[0] = setTimeout(function(){
+      // Setup session termination timer.
+      if(penalizeBark){
+        timeouts[1] = setTimeout(toggleSession, sessionTime,
+          document.getElementById('bark_reduction'));
+        } else{
+          timeouts[1] = setTimeout(toggleSession, sessionTime,
+            document.getElementById('bark_strengthening'));
+          }
+          // Start with a reward.
+          feedAll();
+          // Setup reward timer.
+          timeouts[2] = setTimeout(treat, getRandom(minReward,
+            maxReward, rewardDistribution));
+            // Poll mic.
+            if(interval === null){
+              interval = setInterval(function(){
+                getVolume();
+                if(document.getElementById("volume_threshold").value < volume
+                && penalizeBark){
+                  clearTimeout(timeouts[2]);
+                  timeouts[2] = setTimeout(treat, getRandom(minPenalty,
+                    maxPenalty, penaltyDistribution));
+                  }
+                }, 100);
+              }
+              timeouts[0] = null;
+            }, delayTime);
+          };
+
+          function feedAll(){
+            if(2000 <= (Date.now() - lastFeed)){ // Enfocre 2 second cooldown.
+              lastFeed = Date.now();
+              // For now, iterate over all feeders, but eventually the event should
+              // carry enough information to select the proper feeder.
+              for(const feeder of feeders){
+                return feeder.then(server => server.getPrimaryService(serviceUuid))
+                .then(service => service.getCharacteristic(characteristicUuid))
+                .then(characteristic => {
+                  return characteristic.writeValue(Uint8Array.of(0));
+                });
+              }
+            }
+          };
+
+          /** This function generates a random number.
+          @param a This represents the minimum for an uniform distribution,
+          the average for a normal distribution
+          @param b This represents the maximum for an uniform distribution,
+          the standard deviation for a normal distribution
+          @param distribution This is the distribution the numbers
+          are drawn from.
+          @param c This represents the skew of a normal distribution
+          */
+          function getRandom(a, b, distribution = "uniform", c = 0){
+            var result;
+            function randomNormals(){
+              let u1 = 0, u2 = 0;
+              //Convert [0,1) to (0,1)
+              while (u1 === 0) u1 = Math.random();
+              while (u2 === 0) u2 = Math.random();
+              const r = Math.sqrt(-2.0 * Math.log(u1));
+              const theta = 2.0 * Math.PI * u2;
+              return [r * Math.cos(theta), r * Math.sin(theta)];
+            };
+            function randomSkewNormal (mean, standardDeviation, skew = 0) {
+              const [u0, v] = randomNormals(Math.random);
+              if (skew === 0) {
+                return mean + standardDeviation * u0;
+              }
+              const delta = skew / Math.sqrt(1 + skew * skew);
+              const u1 = delta * u0 + Math.sqrt(1 - delta * delta) * v;
+              const z = u0 >= 0 ? u1 : -u1;
+              return mean + standardDeviation * z;
+            };
+            switch(distribution.toLowerCase()){
+              case "constant":
+              result = a;
+              break;
+              case "uniform":
+              result = Math.floor(Math.random() * (Math.max(a,b) - Math.min(a,b)) +
+              Math.min(a, b));
+              break;
+              case "normal":
+              result = randomSkewNormal(a, b, c);
+              break;
+              default:
+              alert(distribution + " is not a recognized option")
+            }
+            return result;
+          };
+
+          async function getVolume() {
+            const amplitudes = new Uint8Array(analyser.frequencyBinCount);
+            analyser.getByteFrequencyData(amplitudes);
+            volume = 0;
+            for(const amplitude of amplitudes)
+            if(volume < amplitude)
+            volume = amplitude;
+            volume = Math.round(volume / 2.55);
+            volume_threshold.style.setProperty('--current_volume', volume + '%');
+          };
+
+          function pairFeeder(){
+            let filters = []; ///< Stores an array of filter criteria.
+            let options = {}; ///< Creates an object to store the options in.
+            filters.push({
+              name: "PTFeeder"
+            }); // Only the Pet Tutor feeder is supported.
+            options.filters = filters; // Set the filters.
+            options.optionalServices = [serviceUuid]; // Needed for feed to work.
+            try {
+              navigator.bluetooth.requestDevice(options).then(device => {
+                feeders.push(device.gatt.connect());
+              });
+            } catch (error) {
+              alert("Unable to pair feeder!");
+            }
+          };
+
+          function toggleSession(element){
+            // Bark Reduction Code
+            isRunning = !isRunning;
+            if(element.id == "bark_reduction"){
+              if(element.innerText == "Start Bark Reduction"){
+                document.getElementById("bark_strengthening").disabled = true;
+                element.innerText = "Stop Bark Reduction";
+                barkMode(true);
+              } else{
+                document.getElementById("bark_strengthening").disabled = false;
+                element.innerText = "Start Bark Reduction";
+                clearInterval(interval);
+                interval = null;
+                for(timeout in timeouts){
+                  if(timeout !== null){
+                    clearTimeout(timeout);
+                    timeout = null;
+                  }
+                }
+              }
+            } else{
+              if(element.innerText == "Start Bark Strengthening"){
+                document.getElementById("bark_reduction").disabled = true;
+                element.innerText = "Stop Bark Strengthening";
+                barkMode(false);
+              } else{
+                document.getElementById("bark_reduction").disabled = false;
+                element.innerText = "Start Bark Strengthening";
+                clearInterval(interval);
+                interval = null;
+                for(timeout in timeouts){
+                  if(timeout !== null){
+                    clearTimeout(timeout);
+                    timeout = null;
+                  }
+                }
+              }
+            }
+          };
+
+          function updatePenalty(){
+            var penaltyDropdown = document.getElementById("sound_penalty_dropdown");
+            var penaltyDistribution = penaltyDropdown.options[penaltyDropdown.selectedIndex].value;
+            switch(penaltyDistribution.toLowerCase()){
+              case "constant":
+              document.getElementById("maxPenaltyInterval").style.visibility = "hidden";
+              document.getElementById("minPenaltyLabel").innerText = "Penalty Interval: ";
+              document.getElementById("maxPenaltyMinutes").value =
+              document.getElementById("minPenaltyMinutes").value;
+              document.getElementById("maxPenaltySeconds").value =
+              document.getElementById("minPenaltySeconds").value;
+              break;
+              case "uniform":
+              document.getElementById("maxPenaltyInterval").style.visibility = "visible";
+              document.getElementById("maxPenaltyLabel").innerText = "Max Penalty Interval: ";
+              document.getElementById("minPenaltyLabel").innerText = "Min Penalty Interval: ";
+              break;
+              case "normal":
+              document.getElementById("maxPenaltyInterval").style.visibility = "visible";
+              document.getElementById("maxPenaltyLabel").innerText = "Penalty Standard Deviation: ";
+              document.getElementById("minPenaltyLabel").innerText = "Penalty Average: ";
+              break
+            }
+          };
+
+          function updateReward(){
+            var rewardDropdown = document.getElementById("sound_treat_dropdown");
+            var rewardDistribution = rewardDropdown.options[rewardDropdown.selectedIndex].value;
+            switch(rewardDistribution.toLowerCase()){
+              case "constant":
+              document.getElementById("maxRewardInterval").style.visibility = "hidden";
+              document.getElementById("minRewardLabel").innerText = "Reward Interval: ";
+              document.getElementById("maxRewardMinutes").value =
+              document.getElementById("minRewardMinutes").value;
+              document.getElementById("maxRewardSeconds").value =
+              document.getElementById("minRewardSeconds").value;
+              break;
+              case "uniform":
+              document.getElementById("maxRewardInterval").style.visibility = "visible";
+              document.getElementById("maxRewardLabel").innerText = "Max Reward Interval: ";
+              document.getElementById("minRewardLabel").innerText = "Min Reward Interval: ";
+              break;
+              case "normal":
+              document.getElementById("maxRewardInterval").style.visibility = "visible";
+              document.getElementById("maxRewardLabel").innerText = "Reward Standard Deviation: ";
+              document.getElementById("minRewardLabel").innerText = "Reward Average: ";
+              break
+            }
+          };
+          </script>
+        </head>
+        <body>
+          <p>This sample is designed to work with Google Chrome version 87 or newer,
+            but it should work with any browser supporting the WebBluetooth standard.
+            Currently this should work on Windows 10, Mac OS, and Android with limited
+            support for Linux. This page must be hosted on a webserver using TLS or
+            SSL as evidenced by an HTTPS prefix, but the security certificate can
+            be self-signed (untrusted)</p>
+            <p>First, ensure your PetTutor feeder is turned on (best to power cycle it
+              as I have had issues with its Bluetooth freezing). Next, click the "Pair
+              Feeder(s)" button. A dialog should appear and eventually show all feeders
+              (if you changed the feeder name in the official PetTutor app you will need
+              to change it back to PTFeeder). Click "Pair". Feel free to add additional
+              feeders following the same steps. When you are ready to feed, press "Start".
+              In "Bark Reduction Mode" treats are witheld for exceeding the threshold. In
+              "Bark Strengthening Mode" treats are witheld for silence. Please note that
+              hardware limitations in the PetTutor require a 2 second delay between
+              dispenses. The slider initializes itself to be higher than the background
+              noise at the instant the "Start" button is clicked.</p>
+              <table>
+                <tr>
+                  <td></td>
+                  <td>HH</td>
+                  <td>MM</td>
+                  <td>SS</td>
+                </tr>
+                <tr>
+                  <td>Start After:</td>
+                  <td><input type="number" value="0" min="0" max="23" step="1" id="delayHours"></input></td>
+                  <td><input type="number" value="0" min="0" max="59" step="1" id="delayMinutes"></input></td>
+                  <td><input type="number" value="0" min="0" max="59" step="1" id="delaySeconds"></input></td>
+                </tr>
+                <tr>
+                  <td>Session Time:</td>
+                  <td><input type="number" value="0" min="0" max="23" step="1" id="sessionHours"></input></td>
+                  <td><input type="number" value="0" min="0" max="59" step="1" id="sessionMinutes"></input></td>
+                  <td><input type="number" value="0" min="0" max="59" step="1" id="sessionSeconds"></input></td>
+                </tr>
+                <tr>
+                  <td id="minTreatLabel">Treat Interval: </td>
+                  <td></td>
+                  <td><input type="number" value="0" min="0" max="59" step="1" id="minTreatMinutes"></input></td>
+                  <td><input type="number" value="0" min="0" max="59" step="1" id="minTreatSeconds"></input></td>
+                  <td>
+                    <select id="sound_treat_dropdown" onchange="updateReward()">
+                      <option value="constant" selected="">Constant Treat</option>
+                      <option value="uniform">Uniform Treat</option>
+                      <option value="normal">Normal Treat</option>
+                    </select>
+                  </td>
+                </tr>
+                <tr id="maxTreatInterval" style="visibility: hidden">
+                  <td id="maxTreatLabel">Max Treat Interval:</td>
+                  <td></td>
+                  <td><input type="number" value="0" min="0" max="59" step="1" id="maxTreatMinutes"></input></td>
+                  <td><input type="number" value="0" min="0" max="59" step="1" id="maxTreatSeconds"></input></td>
+                </tr>
+                <tr>
+                  <td>Volume Threshold: </td>
+                  <td><input type="range" min="1" max="100" value="30" class="slider" id="volume_threshold"></td>
+                </tr>
+                <tr>
+                  <td id="minPenaltyLabel">Penalty Interval: </td>
+                  <td></td>
+                  <td><input type="number" value="0" min="0" max="59" step="1" id="minPenaltyMinutes"></input></td>
+                  <td><input type="number" value="0" min="0" max="59" step="1" id="minPenaltySeconds"></input></td>
+                  <td>
+                    <select id="sound_penalty_dropdown" onchange="updatePenalty()">
+                      <option value="constant" selected="">Constant Penalty</option>
+                      <option value="uniform">Uniform Penalty</option>
+                      <option value="normal">Normal Penalty</option>
+                    </select>
+                  </td>
+                </tr>
+                <tr id="maxPenaltyInterval" style="visibility: hidden">
+                  <td id="maxPenaltyLabel">Max Penalty Interval: </td>
+                  <td></td>
+                  <td><input type="number" value="0" min="0" max="59" step="1" id="maxPenaltyMinutes"></input></td>
+                  <td><input type="number" value="0" min="0" max="59" step="1" id="maxPenaltySeconds"></input></td>
+                </tr>
+                <tr>
+                  <td><button type="button" onclick="pairFeeder()">Pair Feeder(s)</button></td>
+                  <td><button type="button" onclick="toggleSession(this)" id="bark_reduction">Start Bark Reduction</button></td>
+                  <td><button type="button" onclick="toggleSession(this)" id="bark_strengthening">Start Bark Strengthening</button></td>
+                </tr>
+              </table>
+            </body>
+            </html>

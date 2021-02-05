@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<!--
+The MIT License (MIT)
+
+Copyright (c) 2021 Nathan Jenkins
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Javascript PetTutor Voice Trigger Demo</title>
+    <style>
+      #volume_threshold {
+        --current_volume: 0%;
+        position: relative;
+      }
+
+      #volume_threshold::before {
+         content: '';
+         position: absolute;
+         top: 0;
+         bottom: 0;
+         left: 0;
+         width: var(--current_volume);
+         background-color: green;
+         opacity: .5;
+         transition: width 100ms linear;
+      }
+    </style>
+    <script>
+      var analyser; ///< Handle for microphone processing.
+      let characteristicUuid = "b0e6a4bf-cccc-ffff-330c-0000000000f1"; // Hard code the PetTutor characteristic ID.
+      let feeders = []; ///< Create an array of feeder objects.
+      var interval; ///< Handle for the mic polling function.
+      var lastFeed; ///< Stores the last feeding time to enforce cooldown.
+      let serviceUuid = "b0e6a4bf-cccc-ffff-330c-0000000000f0"; // Hard code the PetTutor service ID.
+      var volume; ///< Stores the last retrived volume.
+
+      document.addEventListener("DOMContentLoaded", async function() {
+        // Initialize last feed.
+        lastFeed = 0;
+        // Initialize microphone.
+        interval = null;
+        navigator.getUserMedia = navigator.getUserMedia ||
+          navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+        navigator.getUserMedia({
+          "audio": {
+            "mandatory": {
+              "googEchoCancellation": "false",
+              "googAutoGainControl": "false",
+              "googNoiseSuppression": "false",
+              "googHighpassFilter": "false"
+            },
+            "optional": []
+          },
+        }, function(audioStream) {
+          const audioContext = new AudioContext();
+          const audioSource = audioContext.createMediaStreamSource(audioStream);
+          analyser = audioContext.createAnalyser();
+          analyser.fftSize = 512;
+          analyser.minDecibels = -100;
+          analyser.maxDecibels = 0; // Loudest possible sound.
+          analyser.smoothingTimeConstant = 0;
+          audioSource.connect(analyser);
+        }, function() {
+          alert("Unable to open microphone.");
+        });
+      });
+
+      function feedAll(){
+        if(2000 <= (Date.now() - lastFeed)){ // Enfocre 2 second cooldown.
+          lastFeed = Date.now();
+          // For now, iterate over all feeders, but eventually the event should
+          // carry enough information to select the proper feeder.
+          for(const feeder of feeders){
+            return feeder.then(server => server.getPrimaryService(serviceUuid))
+              .then(service => service.getCharacteristic(characteristicUuid))
+              .then(characteristic => {
+                return characteristic.writeValue(Uint8Array.of(0));
+              });
+            }
+          }
+      };
+
+      async function getVolume() {
+        const amplitudes = new Uint8Array(analyser.frequencyBinCount);
+        analyser.getByteFrequencyData(amplitudes);
+        volume = 0;
+        for(const amplitude of amplitudes)
+          if(volume < amplitude)
+            volume = amplitude;
+        volume = Math.round(volume / 2.55);
+        volume_threshold.style.setProperty('--current_volume', volume + '%');
+      };
+
+      function pairFeeder(){
+        let filters = []; ///< Stores an array of filter criteria.
+        let options = {}; ///< Creates an object to store the options in.
+        filters.push({
+          name: "PTFeeder"
+        }); // Only the Pet Tutor feeder is supported.
+        options.filters = filters; // Set the filters.
+        options.optionalServices = [serviceUuid]; // Needed for feed to work.
+        try {
+          navigator.bluetooth.requestDevice(options).then(device => {
+            feeders.push(device.gatt.connect());
+          });
+        } catch (error) {
+          alert("Unable to pair feeder!");
+        }
+      };
+
+      function toggleSession(element){
+        if(element.innerText == "Start"){
+          element.innerText = "Stop";
+          // Initialize threshold.
+          getVolume();
+          document.getElementById("volume_threshold").value = volume + 1;
+          if(interval === null)
+            interval = setInterval(function(){
+              getVolume();
+              if(document.getElementById("volume_threshold").value < volume){
+                feedAll();
+              }
+            }, 100);
+        } else{
+          element.innerText = "Start";
+          clearInterval(interval);
+          interval = null;
+        }
+      };
+    </script>
+  </head>
+  <body>
+    <p>This sample is designed to work with Google Chrome version 87 or newer,
+    but it should work with any browser supporting the WebBluetooth standard.
+    Currently this should work on Windows 10, Mac OS, and Android with limited
+    support for Linux. This page must be hosted on a webserver using TLS or
+    SSL as evidenced by an HTTPS prefix, but the security certificate can
+    be self-signed (untrusted)</p>
+    <p>First, ensure your PetTutor feeder is turned on (best to power cycle it
+    as I have had issues with its Bluetooth freezing). Next, click the "Pair
+    Feeder(s)" button. A dialog should appear and eventually show all feeders
+    (if you changed the feeder name in the official PetTutor app you will need
+    to change it back to PTFeeder). Click "Pair". Feel free to add additional
+    feeders following the same steps. When you are ready to feed, press "Start"
+    and make a noise until the threshold is exceeded. Please note that
+    hardware limitations in the PetTutor require a 2 second delay between
+    dispenses. The slider initializes itself to be higher than the background
+    noise at the instant the "Start" button is clicked.</p>
+    <button type="button" onclick="pairFeeder()">Pair Feeder(s)</button>
+    <input type="range" min="1" max="100" value="30" class="slider" id="volume_threshold">
+    <button type="button" onclick="toggleSession(this)" id="session_state">Start</button>
+  </body>
+</html>
